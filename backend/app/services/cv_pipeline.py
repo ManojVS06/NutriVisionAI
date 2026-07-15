@@ -12,58 +12,16 @@ from app.services.quality_checker import assess_image_quality
 from app.services.semantic_matcher import match_food_semantic
 from app.services.nutrition_validator import validate_nutrition
 
-# ============================================================================
-# EXPANDED IFCT FOOD DENSITY & NUTRITION DATABASE (per 100g)
-# ============================================================================
-FOOD_DENSITY_NUTRITION = {
-    # Cereals & Breads
-    "Cooked White Rice": {"density": 0.82, "calories_100g": 130, "protein_100g": 2.7, "carbs_100g": 28.0, "fat_100g": 0.3, "fiber_100g": 0.4, "sodium_100g": 1.0, "sugar_100g": 0.1, "category": "Cereal"},
-    "Jeera Rice": {"density": 0.82, "calories_100g": 142, "protein_100g": 2.8, "carbs_100g": 26.0, "fat_100g": 3.2, "fiber_100g": 0.5, "sodium_100g": 120.0, "sugar_100g": 0.2, "category": "Cereal"},
-    "Roti / Chapati": {"density": 0.60, "calories_100g": 264, "protein_100g": 8.0, "carbs_100g": 48.0, "fat_100g": 3.0, "fiber_100g": 7.0, "sodium_100g": 5.0, "sugar_100g": 0.4, "category": "Cereal"},
-    "Naan": {"density": 0.55, "calories_100g": 310, "protein_100g": 9.0, "carbs_100g": 54.0, "fat_100g": 6.5, "fiber_100g": 2.0, "sodium_100g": 400.0, "sugar_100g": 3.0, "category": "Cereal"},
-    "Paratha": {"density": 0.58, "calories_100g": 326, "protein_100g": 7.0, "carbs_100g": 44.0, "fat_100g": 14.0, "fiber_100g": 3.0, "sodium_100g": 290.0, "sugar_100g": 1.0, "category": "Cereal"},
-    "Puri": {"density": 0.40, "calories_100g": 350, "protein_100g": 6.5, "carbs_100g": 42.0, "fat_100g": 18.0, "fiber_100g": 2.5, "sodium_100g": 310.0, "sugar_100g": 1.2, "category": "Cereal"},
-    "Idli": {"density": 0.65, "calories_100g": 120, "protein_100g": 6.0, "carbs_100g": 28.0, "fat_100g": 0.5, "fiber_100g": 1.5, "sodium_100g": 180.0, "sugar_100g": 0.2, "category": "Cereal"},
-    "Dosa": {"density": 0.50, "calories_100g": 168, "protein_100g": 4.0, "carbs_100g": 28.0, "fat_100g": 4.5, "fiber_100g": 1.0, "sodium_100g": 200.0, "sugar_100g": 0.5, "category": "Cereal"},
-    "Masala Dosa": {"density": 0.55, "calories_100g": 190, "protein_100g": 4.5, "carbs_100g": 30.0, "fat_100g": 6.0, "fiber_100g": 1.5, "sodium_100g": 220.0, "sugar_100g": 0.6, "category": "Cereal"},
-    "Upma": {"density": 0.75, "calories_100g": 135, "protein_100g": 3.5, "carbs_100g": 18.0, "fat_100g": 5.5, "fiber_100g": 1.8, "sodium_100g": 250.0, "sugar_100g": 0.4, "category": "Cereal"},
-    "Poha": {"density": 0.60, "calories_100g": 130, "protein_100g": 2.8, "carbs_100g": 22.0, "fat_100g": 3.8, "fiber_100g": 1.5, "sodium_100g": 210.0, "sugar_100g": 0.5, "category": "Cereal"},
 
-    # Pulses & Dals
-    "Yellow Dal Tadka": {"density": 1.00, "calories_100g": 86, "protein_100g": 5.0, "carbs_100g": 12.0, "fat_100g": 2.2, "fiber_100g": 3.0, "sodium_100g": 280.0, "sugar_100g": 0.5, "category": "Pulses"},
-    "Dal Makhani": {"density": 1.05, "calories_100g": 120, "protein_100g": 5.5, "carbs_100g": 12.0, "fat_100g": 5.5, "fiber_100g": 3.5, "sodium_100g": 320.0, "sugar_100g": 1.0, "category": "Pulses"},
-    "Rajma": {"density": 1.00, "calories_100g": 110, "protein_100g": 6.5, "carbs_100g": 16.0, "fat_100g": 2.0, "fiber_100g": 5.0, "sodium_100g": 310.0, "sugar_100g": 0.8, "category": "Pulses"},
-    "Chole / Chana Masala": {"density": 1.00, "calories_100g": 125, "protein_100g": 7.0, "carbs_100g": 18.0, "fat_100g": 3.0, "fiber_100g": 5.0, "sodium_100g": 340.0, "sugar_100g": 1.5, "category": "Pulses"},
-    "Sambar": {"density": 1.00, "calories_100g": 55, "protein_100g": 2.5, "carbs_100g": 8.5, "fat_100g": 1.2, "fiber_100g": 2.0, "sodium_100g": 320.0, "sugar_100g": 1.1, "category": "Pulses"},
+# ── Full IFCT 2017 Database (158 foods, 12 groups) ──────────────────────────
+# Imported from app/data/ifct_database.py — single source of truth
+from app.data.ifct_database import IFCT_DATABASE, TOTAL_ITEMS, CATEGORY_INDEX, ALL_FOOD_NAMES
 
-    # Dairy & Paneer
-    "Paneer Butter Masala": {"density": 1.05, "calories_100g": 229, "protein_100g": 9.2, "carbs_100g": 6.8, "fat_100g": 18.5, "fiber_100g": 0.8, "sodium_100g": 340.0, "sugar_100g": 3.2, "category": "Dairy"},
-    "Shahi Paneer": {"density": 1.05, "calories_100g": 245, "protein_100g": 10.0, "carbs_100g": 8.0, "fat_100g": 19.0, "fiber_100g": 0.5, "sodium_100g": 350.0, "sugar_100g": 3.5, "category": "Dairy"},
-    "Palak Paneer": {"density": 1.02, "calories_100g": 175, "protein_100g": 9.5, "carbs_100g": 6.0, "fat_100g": 13.0, "fiber_100g": 2.5, "sodium_100g": 310.0, "sugar_100g": 1.5, "category": "Dairy"},
-    "Curd / Raita": {"density": 1.03, "calories_100g": 60, "protein_100g": 3.5, "carbs_100g": 4.0, "fat_100g": 3.3, "fiber_100g": 0.0, "sodium_100g": 45.0, "sugar_100g": 4.0, "category": "Dairy"},
-    "Lassi": {"density": 1.03, "calories_100g": 72, "protein_100g": 3.0, "carbs_100g": 10.0, "fat_100g": 2.5, "fiber_100g": 0.0, "sodium_100g": 50.0, "sugar_100g": 8.0, "category": "Dairy"},
+# Backward-compatible alias — all existing code uses FOOD_DENSITY_NUTRITION
+FOOD_DENSITY_NUTRITION = IFCT_DATABASE
 
-    # Vegetables
-    "Mixed Vegetable Salad": {"density": 0.30, "calories_100g": 25, "protein_100g": 1.2, "carbs_100g": 4.5, "fat_100g": 0.2, "fiber_100g": 2.5, "sodium_100g": 10.0, "sugar_100g": 2.0, "category": "Vegetables"},
-    "Aloo Gobi": {"density": 0.85, "calories_100g": 100, "protein_100g": 2.5, "carbs_100g": 12.0, "fat_100g": 5.0, "fiber_100g": 2.5, "sodium_100g": 260.0, "sugar_100g": 1.0, "category": "Vegetables"},
-    "Bhindi / Okra Fry": {"density": 0.70, "calories_100g": 90, "protein_100g": 2.0, "carbs_100g": 8.0, "fat_100g": 6.0, "fiber_100g": 3.0, "sodium_100g": 190.0, "sugar_100g": 0.5, "category": "Vegetables"},
-    "Baingan Bharta": {"density": 0.85, "calories_100g": 80, "protein_100g": 1.8, "carbs_100g": 7.0, "fat_100g": 5.0, "fiber_100g": 3.0, "sodium_100g": 240.0, "sugar_100g": 1.5, "category": "Vegetables"},
-    "Green Chutney": {"density": 0.95, "calories_100g": 40, "protein_100g": 1.0, "carbs_100g": 5.0, "fat_100g": 1.5, "fiber_100g": 1.5, "sodium_100g": 350.0, "sugar_100g": 1.0, "category": "Vegetables"},
-    "Pickle / Achar": {"density": 1.00, "calories_100g": 150, "protein_100g": 1.5, "carbs_100g": 8.0, "fat_100g": 12.0, "fiber_100g": 2.0, "sodium_100g": 1200.0, "sugar_100g": 3.0, "category": "Vegetables"},
+print(f"[IFCT] Loaded {TOTAL_ITEMS} foods across {len(CATEGORY_INDEX)} categories")
 
-    # Meat & Non-Veg
-    "Chicken Biryani": {"density": 0.90, "calories_100g": 163, "protein_100g": 10.5, "carbs_100g": 22.0, "fat_100g": 5.6, "fiber_100g": 1.6, "sodium_100g": 310.0, "sugar_100g": 0.8, "category": "Meat"},
-    "Chicken Curry": {"density": 1.00, "calories_100g": 150, "protein_100g": 14.0, "carbs_100g": 5.0, "fat_100g": 8.5, "fiber_100g": 1.0, "sodium_100g": 380.0, "sugar_100g": 1.0, "category": "Meat"},
-    "Butter Chicken": {"density": 1.02, "calories_100g": 195, "protein_100g": 12.0, "carbs_100g": 7.0, "fat_100g": 14.0, "fiber_100g": 1.0, "sodium_100g": 420.0, "sugar_100g": 3.0, "category": "Meat"},
-    "Mutton Curry": {"density": 1.02, "calories_100g": 180, "protein_100g": 15.0, "carbs_100g": 4.0, "fat_100g": 12.0, "fiber_100g": 0.5, "sodium_100g": 350.0, "sugar_100g": 0.8, "category": "Meat"},
-    "Fish Curry": {"density": 1.00, "calories_100g": 120, "protein_100g": 15.0, "carbs_100g": 4.0, "fat_100g": 5.5, "fiber_100g": 0.5, "sodium_100g": 380.0, "sugar_100g": 0.5, "category": "Meat"},
-    "Boiled Egg": {"density": 1.10, "calories_100g": 155, "protein_100g": 13.0, "carbs_100g": 1.1, "fat_100g": 11.0, "fiber_100g": 0.0, "sodium_100g": 124.0, "sugar_100g": 1.1, "category": "Meat"},
-    "Egg Curry": {"density": 1.00, "calories_100g": 145, "protein_100g": 10.0, "carbs_100g": 5.0, "fat_100g": 10.0, "fiber_100g": 0.8, "sodium_100g": 330.0, "sugar_100g": 1.2, "category": "Meat"},
-
-    # Sweets & Snacks
-    "Gulab Jamun": {"density": 1.10, "calories_100g": 320, "protein_100g": 3.5, "carbs_100g": 50.0, "fat_100g": 12.0, "fiber_100g": 0.0, "sodium_100g": 80.0, "sugar_100g": 40.0, "category": "Sweets"},
-    "Papad": {"density": 0.30, "calories_100g": 330, "protein_100g": 20.0, "carbs_100g": 45.0, "fat_100g": 7.0, "fiber_100g": 5.0, "sodium_100g": 1600.0, "sugar_100g": 0.5, "category": "Snack"},
-}
 
 # Pre-defined demo foods coordinate mappings for portfolio showcase
 DEMO_MEALS = {
