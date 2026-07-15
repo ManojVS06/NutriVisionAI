@@ -59,6 +59,8 @@ class Meal(Base):
     total_sugar = Column(Float, default=0.0)   # in g
     health_score = Column(Integer, default=50)  # 0 to 100
     coach_notes = Column(String, nullable=True)  # AI Coach advice text
+    quality_score = Column(Float, default=100.0) # Image quality gate score (0-100)
+    detection_method = Column(String, default="gemini_vision")  # gemini_vision | openrouter_vision | opencv_fallback | demo
     
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
@@ -84,6 +86,8 @@ class FoodItem(Base):
     density = Column(Float, default=1.0)
     volume_cm3 = Column(Float, default=0.0)
     bounding_box = Column(String, nullable=True)  # JSON string of coordinates: [xmin, ymin, xmax, ymax]
+    confidence = Column(Float, default=1.0)       # Detection confidence (0.0-1.0)
+    detection_method = Column(String, default="gemini_vision")  # Per-item method used
 
     # Relationships
     meal = relationship("Meal", back_populates="food_items")

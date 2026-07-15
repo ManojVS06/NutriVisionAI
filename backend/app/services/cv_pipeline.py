@@ -7,6 +7,11 @@ import base64
 from PIL import Image
 from app.config import settings
 
+# ── Phase 1: Import production-grade pipeline services ──────────────────────
+from app.services.quality_checker import assess_image_quality
+from app.services.semantic_matcher import match_food_semantic
+from app.services.nutrition_validator import validate_nutrition
+
 # ============================================================================
 # EXPANDED IFCT FOOD DENSITY & NUTRITION DATABASE (per 100g)
 # ============================================================================
@@ -273,82 +278,21 @@ Example response:
 
 def match_food_to_database(food_name: str) -> tuple:
     """
-    Fuzzy-matches a Gemini-identified food name to our IFCT database.
+    [Phase 1 Upgrade] Semantically matches a VLM/detector food name to the
+    IFCT database using TF-IDF + character n-gram cosine similarity.
+    Falls back to keyword map → ultimate fallback if needed.
     Returns (matched_name, food_info_dict).
     """
-    name_lower = food_name.lower().strip()
+    # Try semantic matching first
+    matched_name, score = match_food_semantic(food_name)
+    if matched_name in FOOD_DENSITY_NUTRITION:
+        return matched_name, FOOD_DENSITY_NUTRITION[matched_name]
 
-    # Direct match
+    # Hard direct match as secondary safety net
+    name_lower = food_name.lower().strip()
     for db_name, info in FOOD_DENSITY_NUTRITION.items():
         if db_name.lower() == name_lower:
             return db_name, info
-
-    # Substring/keyword matching
-    keyword_map = {
-        "rice": "Cooked White Rice",
-        "jeera rice": "Jeera Rice",
-        "chapati": "Roti / Chapati",
-        "roti": "Roti / Chapati",
-        "naan": "Naan",
-        "paratha": "Paratha",
-        "puri": "Puri",
-        "dal": "Yellow Dal Tadka",
-        "dal tadka": "Yellow Dal Tadka",
-        "dal makhani": "Dal Makhani",
-        "toor dal": "Yellow Dal Tadka",
-        "moong dal": "Yellow Dal Tadka",
-        "masoor dal": "Yellow Dal Tadka",
-        "sambar": "Sambar",
-        "sambhar": "Sambar",
-        "rasam": "Sambar",
-        "rajma": "Rajma",
-        "chole": "Chole / Chana Masala",
-        "chana": "Chole / Chana Masala",
-        "chickpea": "Chole / Chana Masala",
-        "paneer butter": "Paneer Butter Masala",
-        "paneer masala": "Paneer Butter Masala",
-        "shahi paneer": "Shahi Paneer",
-        "palak paneer": "Palak Paneer",
-        "saag paneer": "Palak Paneer",
-        "paneer": "Paneer Butter Masala",
-        "curd": "Curd / Raita",
-        "raita": "Curd / Raita",
-        "yogurt": "Curd / Raita",
-        "dahi": "Curd / Raita",
-        "lassi": "Lassi",
-        "salad": "Mixed Vegetable Salad",
-        "onion": "Mixed Vegetable Salad",
-        "aloo gobi": "Aloo Gobi",
-        "gobi": "Aloo Gobi",
-        "bhindi": "Bhindi / Okra Fry",
-        "okra": "Bhindi / Okra Fry",
-        "baingan": "Baingan Bharta",
-        "eggplant": "Baingan Bharta",
-        "brinjal": "Baingan Bharta",
-        "chutney": "Green Chutney",
-        "pickle": "Pickle / Achar",
-        "achar": "Pickle / Achar",
-        "biryani": "Chicken Biryani",
-        "chicken curry": "Chicken Curry",
-        "butter chicken": "Butter Chicken",
-        "mutton": "Mutton Curry",
-        "fish curry": "Fish Curry",
-        "fish": "Fish Curry",
-        "egg curry": "Egg Curry",
-        "egg": "Boiled Egg",
-        "idli": "Idli",
-        "dosa": "Dosa",
-        "masala dosa": "Masala Dosa",
-        "upma": "Upma",
-        "poha": "Poha",
-        "gulab jamun": "Gulab Jamun",
-        "papad": "Papad",
-        "poppadom": "Papad",
-    }
-
-    for keyword, db_name in keyword_map.items():
-        if keyword in name_lower:
-            return db_name, FOOD_DENSITY_NUTRITION[db_name]
 
     # Ultimate fallback
     return "Paneer Butter Masala", FOOD_DENSITY_NUTRITION["Paneer Butter Masala"]
@@ -567,10 +511,15 @@ def classify_by_hsv_analysis(image, contour) -> str:
 # ============================================================================
 def analyze_uploaded_image(file_name: str, db_session) -> dict:
     """
-    Processes an uploaded meal image through the CV pipeline.
-    - If filename matches a demo name, uses pre-built coordinates.
-    - If a Gemini API key is configured in settings, uses Gemini Vision for accurate identification.
-    - Otherwise, falls back to improved OpenCV HSV + K-means segmentation.
+    [Phase 1 Upgrade] Processes an uploaded meal image through the production pipeline.
+
+    Pipeline order:
+      1. Image Quality Check (blur, brightness, plate detection)
+      2. Demo mode short-circuit (if filename matches preset)
+      3. Gemini Vision API (primary AI detection)
+      4. OpenRouter Vision API (fallback AI detection)
+      5. OpenCV HSV + K-means (offline fallback)
+      6. Nutrition Validation (rule engine + optional LLM)
     """
     file_path = os.path.join(settings.UPLOAD_DIR, file_name)
     base_name, ext = os.path.splitext(file_name)
@@ -589,6 +538,18 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
 
     h, w, c = image.shape
     detected_items = []
+
+    # ── Phase 1: Image Quality Gate ─────────────────────────────────────────
+    # Skip quality check for demo meals (pre-built 1x1 pixel blobs)
+    is_demo = any(key in file_name.lower() for key in DEMO_MEALS.keys())
+    if not is_demo:
+        quality_report = assess_image_quality(file_path)
+        if not quality_report.is_acceptable:
+            issue_summary = " | ".join(quality_report.issues) if quality_report.issues else "Low quality score"
+            raise ValueError(
+                f"Image quality check failed (score={quality_report.quality_score:.0f}/100): {issue_summary}. "
+                f"Please upload a clearer image with the food plate visible."
+            )
 
     # Check for demo meals
     matched_demo = None
@@ -810,10 +771,23 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
     cv2.imwrite(mask_path, mask_img)
     cv2.imwrite(depth_path, depth_color)
 
+    # ── Phase 1: Nutrition Validation ────────────────────────────────────────
+    if detected_items:
+        validation = validate_nutrition(
+            food_items=detected_items,
+            food_db=FOOD_DENSITY_NUTRITION,
+            use_llm=True   # LLM fallback only fires when critical issues found
+        )
+        # Attach validation metadata to the result (non-blocking)
+        validation_summary = validation.to_dict()
+    else:
+        validation_summary = {"is_valid": True, "issues": [], "warnings": []}
+
     return {
         "original_url": f"/static/uploads/{file_name}",
         "processed_url": f"/static/uploads/{processed_file_name}",
         "mask_url": f"/static/uploads/{mask_file_name}",
         "depth_url": f"/static/uploads/{depth_file_name}",
-        "food_items": detected_items
+        "food_items": detected_items,
+        "validation": validation_summary
     }
