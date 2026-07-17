@@ -7,10 +7,30 @@ import base64
 from PIL import Image
 from app.config import settings
 
-# ── Phase 1: Import production-grade pipeline services ──────────────────────
+# ── Phase 1: Core pipeline services ────────────────────────────────────────
 from app.services.quality_checker import assess_image_quality
 from app.services.semantic_matcher import match_food_semantic
 from app.services.nutrition_validator import validate_nutrition
+
+# ── Phase 2: Deep learning detector + classifier ─────────────────────────────
+try:
+    from app.services.detector import detect_foods, crop_food_region
+    from app.services.food_classifier import classify_food_crops_batch
+    PHASE2_AVAILABLE = True
+except ImportError:
+    PHASE2_AVAILABLE = False
+    print("[Pipeline] Phase 2 services not available — torch not installed")
+
+# ── Phase 3: Depth estimation ─────────────────────────────────────────────────
+try:
+    from app.services.depth_estimator import (
+        estimate_depth_map, estimate_volume_from_depth,
+        generate_depth_colormap, fallback_depth_estimate
+    )
+    PHASE3_AVAILABLE = True
+except ImportError:
+    PHASE3_AVAILABLE = False
+    print("[Pipeline] Phase 3 services not available")
 
 
 # ── Full IFCT 2017 Database (158 foods, 12 groups) ──────────────────────────
@@ -575,153 +595,242 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
         depth_color = cv2.applyColorMap(depth_img, cv2.COLORMAP_INFERNO)
 
     else:
-        # =============== GEMINI / OPENROUTER VISION MODE ===============
+        # ==================================================================
+        # TIER 1: Grounding DINO (local, zero-shot open-vocabulary)
+        # → TIER 2: CLIP (crop-level classification against 155 IFCT foods)
+        # → TIER 3: Gemini/OpenRouter (for low-confidence regions only)
+        # → TIER 4: OpenCV HSV fallback (fully offline)
+        # ==================================================================
+
+        gdino_detections = []
+        detection_method = "opencv_fallback"
+
+        # ── TIER 1: Grounding DINO ─────────────────────────────────────────
+        if PHASE2_AVAILABLE:
+            gdino_detections, detection_method = detect_foods(file_path)
+
+        # ── TIER 2: CLIP refines Grounding DINO labels ─────────────────────
+        clip_classified = []
+        if PHASE2_AVAILABLE and gdino_detections:
+            crops = [crop_food_region(image, d["bbox_px"]) for d in gdino_detections]
+            hints = [d["name"] for d in gdino_detections]
+            clip_results = classify_food_crops_batch(crops, hints=hints)
+
+            for det, clip_preds in zip(gdino_detections, clip_results):
+                if clip_preds:
+                    best = clip_preds[0]
+                    clip_classified.append({
+                        **det,
+                        "clip_name":  best["name"],
+                        "clip_score": best["score"],
+                        "needs_gemini": best["needs_gemini"]
+                    })
+                else:
+                    clip_classified.append({**det, "clip_name": det["name"],
+                                            "clip_score": 0.0, "needs_gemini": True})
+        elif gdino_detections:
+            # GDINO available but CLIP not — use GDINO labels directly
+            for det in gdino_detections:
+                clip_classified.append({**det, "clip_name": det["name"],
+                                        "clip_score": det["confidence"],
+                                        "needs_gemini": det["needs_gemini"]})
+
+        # ── TIER 3: Gemini for low-confidence or fallback ──────────────────
         gemini_items = None
-        
-        # Try primary Gemini API key
-        if settings.GEMINI_API_KEY:
-            gemini_items = classify_foods_with_gemini(file_path, settings.GEMINI_API_KEY)
-            
-        # Try OpenRouter API key as fallback/alternative
-        if not gemini_items and settings.OPENROUTER_API_KEY:
-            gemini_items = classify_foods_with_openrouter(file_path, settings.OPENROUTER_API_KEY)
+        needs_gemini_overall = (not clip_classified or
+                                all(c["needs_gemini"] for c in clip_classified))
 
-        if gemini_items:
-            # Use Gemini's results for accurate detection
-            plate_pixel_diameter = max(w, h) * 0.85
-            pixels_per_cm = plate_pixel_diameter / 26.0
+        if needs_gemini_overall:
+            if settings.GEMINI_API_KEY:
+                gemini_items = classify_foods_with_gemini(file_path, settings.GEMINI_API_KEY)
+            if not gemini_items and settings.OPENROUTER_API_KEY:
+                gemini_items = classify_foods_with_openrouter(file_path, settings.OPENROUTER_API_KEY)
 
-            for idx, gi in enumerate(gemini_items):
+        # ── TIER 4 decision: which result set to use for rendering ─────────
+        if clip_classified and not needs_gemini_overall:
+            # Best case: GDINO + CLIP succeeded
+            source_items = []
+            for c in clip_classified:
+                matched_name, _ = match_food_semantic(c["clip_name"])
+                source_items.append({
+                    "food_name":  matched_name,
+                    "bbox_pct":   c["bbox_pct"],
+                    "bbox_px":    c["bbox_px"],
+                    "weight_g":   None,   # computed from depth below
+                    "confidence": c["clip_score"],
+                    "method":     "gdino_clip"
+                })
+        elif gemini_items:
+            # Gemini/OpenRouter results
+            source_items = []
+            for gi in gemini_items:
                 food_name = gi.get("name", "Unknown")
-                bbox_pct = gi.get("bbox_pct", [10, 10, 40, 40])
-                est_weight = gi.get("weight_g", 100)
+                bbox_pct  = gi.get("bbox_pct", [10, 10, 40, 40])
+                bbox_px   = [
+                    int(bbox_pct[0] / 100.0 * w), int(bbox_pct[1] / 100.0 * h),
+                    int(bbox_pct[2] / 100.0 * w), int(bbox_pct[3] / 100.0 * h)
+                ]
+                matched_name, _ = match_food_semantic(food_name)
+                source_items.append({
+                    "food_name":  matched_name,
+                    "bbox_pct":   bbox_pct,
+                    "bbox_px":    bbox_px,
+                    "weight_g":   float(gi.get("weight_g", 100)),
+                    "confidence": 0.85,
+                    "method":     "gemini_vision"
+                })
+        else:
+            source_items = []   # Will trigger OpenCV fallback below
 
-                # Convert percentage bbox to pixel coords
-                xmin = int(bbox_pct[0] / 100.0 * w)
-                ymin = int(bbox_pct[1] / 100.0 * h)
-                xmax = int(bbox_pct[2] / 100.0 * w)
-                ymax = int(bbox_pct[3] / 100.0 * h)
-                xmin, ymin = max(0, xmin), max(0, ymin)
-                xmax, ymax = min(w, xmax), min(h, ymax)
+        # ── DEPTH MAP (Phase 3) ────────────────────────────────────────────
+        depth_map = None
+        if PHASE3_AVAILABLE and source_items:
+            depth_map = estimate_depth_map(file_path)
+
+        # ── Build detected_items + draw visualizations ─────────────────────
+        plate_pixel_diameter = max(w, h) * 0.85
+
+        if source_items:
+            for idx, si in enumerate(source_items):
+                food_name  = si["food_name"]
+                bbox_px    = si["bbox_px"]
+                confidence = si.get("confidence", 1.0)
+                method     = si.get("method", "unknown")
+
+                xmin, ymin, xmax, ymax = bbox_px
+                xmin = max(0, xmin); ymin = max(0, ymin)
+                xmax = min(w, xmax); ymax = min(h, ymax)
                 bbox = [xmin, ymin, xmax, ymax]
 
                 color = mask_colors[idx % len(mask_colors)]
 
-                # Draw bounding box
-                cv2.rectangle(bbox_img, (xmin, ymin), (xmax, ymax), color, 3)
-                label = f"{food_name} ({int(est_weight)}g)"
-                # Draw label background
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-                cv2.rectangle(bbox_img, (xmin, ymin - th - 10), (xmin + tw + 6, ymin), color, -1)
-                cv2.putText(bbox_img, label, (xmin + 3, ymin - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
+                # Volume estimation
+                if depth_map is not None and PHASE3_AVAILABLE:
+                    volume = estimate_volume_from_depth(
+                        depth_map, bbox, (h, w), plate_pixel_diameter
+                    )
+                else:
+                    volume = fallback_depth_estimate(
+                        bbox, (h, w), plate_pixel_diameter
+                    ) if PHASE3_AVAILABLE else (
+                        # Legacy geometry fallback
+                        ((xmax-xmin)*(ymax-ymin) * 0.785 /
+                         (plate_pixel_diameter/26.0)**2) * 2.0
+                    )
+
+                _, food_info = match_food_to_database(food_name)
+                density = food_info["density"]
+
+                # Weight: from Gemini estimate if available, else depth-based
+                if si.get("weight_g"):
+                    weight = max(15.0, min(si["weight_g"], 500.0))
+                else:
+                    weight = max(15.0, min(volume * density, 500.0))
+
+                # Draw bbox with confidence-colored border
+                border_color = (
+                    (0, 220, 60) if confidence >= 0.70 else      # green = high conf
+                    (0, 165, 255) if confidence >= 0.50 else      # orange = med conf
+                    (0, 0, 255)                                    # red = low conf
+                )
+                cv2.rectangle(bbox_img, (xmin, ymin), (xmax, ymax), border_color, 3)
+                label = f"{food_name} ({int(weight)}g) [{confidence*100:.0f}%]"
+                (tw, th_t), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                cv2.rectangle(bbox_img, (xmin, ymin-th_t-10), (xmin+tw+6, ymin), border_color, -1)
+                cv2.putText(bbox_img, label, (xmin+3, ymin-5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
 
                 # Elliptical mask
-                cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
-                rx, ry = (xmax - xmin) // 2, (ymax - ymin) // 2
-                cv2.ellipse(mask_img, (cx, cy), (max(1, rx), max(1, ry)), 0, 0, 360, color, -1)
+                cx_c, cy_c = (xmin+xmax)//2, (ymin+ymax)//2
+                rx_c, ry_c = max(1,(xmax-xmin)//2), max(1,(ymax-ymin)//2)
+                cv2.ellipse(mask_img, (cx_c,cy_c), (rx_c,ry_c), 0, 0, 360, color, -1)
 
-                # Depth map
-                item_depth = np.zeros((h, w), dtype=np.uint8)
-                cv2.ellipse(item_depth, (cx, cy), (max(1, rx), max(1, ry)), 0, 0, 360, 255, -1)
-                dist = cv2.distanceTransform(item_depth, cv2.DIST_L2, 3)
-                cv2.normalize(dist, dist, 0, 200, cv2.NORM_MINMAX)
-                depth_img = np.maximum(depth_img, dist.astype(np.uint8))
-
-                # Volume estimation from bbox dimensions
-                area_cm2 = ((xmax - xmin) / pixels_per_cm) * ((ymax - ymin) / pixels_per_cm) * 0.785
-                est_height_cm = 2.0 + (min(rx, ry) / max(w, h)) * 3.0
-                volume = area_cm2 * est_height_cm
-
-                matched_name, food_info = match_food_to_database(food_name)
-                weight = max(15.0, min(float(est_weight), 500.0))
+                # Depth visualization fallback
+                item_depth_u8 = np.zeros((h, w), dtype=np.uint8)
+                cv2.ellipse(item_depth_u8, (cx_c,cy_c), (rx_c,ry_c), 0, 0, 360, 255, -1)
+                dist_t = cv2.distanceTransform(item_depth_u8, cv2.DIST_L2, 3)
+                cv2.normalize(dist_t, dist_t, 0, 200, cv2.NORM_MINMAX)
+                depth_img = np.maximum(depth_img, dist_t.astype(np.uint8))
 
                 detected_items.append({
-                    "name": matched_name,
-                    "weight_g": round(weight, 1),
-                    "volume_cm3": round(volume, 1),
-                    "bounding_box": json.dumps(bbox),
-                    "density": food_info["density"],
-                    "calories": round((food_info["calories_100g"] * weight) / 100.0, 1),
-                    "protein": round((food_info["protein_100g"] * weight) / 100.0, 2),
-                    "carbs": round((food_info["carbs_100g"] * weight) / 100.0, 2),
-                    "fat": round((food_info["fat_100g"] * weight) / 100.0, 2),
-                    "fiber": round((food_info["fiber_100g"] * weight) / 100.0, 2),
-                    "sodium": round((food_info["sodium_100g"] * weight) / 100.0, 1),
-                    "sugar": round((food_info["sugar_100g"] * weight) / 100.0, 2)
+                    "name":           food_name,
+                    "weight_g":       round(weight, 1),
+                    "volume_cm3":     round(volume, 1),
+                    "bounding_box":   json.dumps(bbox),
+                    "density":        density,
+                    "confidence":     round(confidence, 3),
+                    "detection_method": method,
+                    "calories":  round((food_info["calories_100g"] * weight) / 100.0, 1),
+                    "protein":   round((food_info["protein_100g"]  * weight) / 100.0, 2),
+                    "carbs":     round((food_info["carbs_100g"]    * weight) / 100.0, 2),
+                    "fat":       round((food_info["fat_100g"]      * weight) / 100.0, 2),
+                    "fiber":     round((food_info["fiber_100g"]    * weight) / 100.0, 2),
+                    "sodium":    round((food_info["sodium_100g"]   * weight) / 100.0, 1),
+                    "sugar":     round((food_info["sugar_100g"]    * weight) / 100.0, 2)
                 })
 
             cv2.addWeighted(mask_img, 0.4, image, 0.6, 0, mask_img)
-            depth_img = cv2.GaussianBlur(depth_img, (11, 11), 0)
-            depth_color = cv2.applyColorMap(depth_img, cv2.COLORMAP_INFERNO)
+
+            # Use Depth Anything colormap if available, else legacy OpenCV depth
+            if depth_map is not None and PHASE3_AVAILABLE:
+                depth_color = generate_depth_colormap(depth_map)
+            else:
+                depth_img = cv2.GaussianBlur(depth_img, (11, 11), 0)
+                depth_color = cv2.applyColorMap(depth_img, cv2.COLORMAP_INFERNO)
 
         else:
-            # =============== IMPROVED OPENCV FALLBACK ===============
+            # ── TIER 4: OpenCV HSV fallback (fully offline) ────────────────
             food_contours, plate_center, plate_radius = segment_food_regions_opencv(image)
-
             pixels_per_cm = (plate_radius * 2.0) / 26.0
             cm2_per_pixel2 = 1.0 / (pixels_per_cm ** 2)
 
             if not food_contours:
-                # Emergency fallback: quadrant split
                 qw, qh = int(w * 0.4), int(h * 0.4)
-                c1 = np.array([[[int(w*0.05), int(h*0.05)]], [[int(w*0.05), int(h*0.45)]], [[int(w*0.45), int(h*0.45)]], [[int(w*0.45), int(h*0.05)]]], dtype=np.int32)
-                c2 = np.array([[[int(w*0.55), int(h*0.05)]], [[int(w*0.55), int(h*0.45)]], [[int(w*0.95), int(h*0.45)]], [[int(w*0.95), int(h*0.05)]]], dtype=np.int32)
-                c3 = np.array([[[int(w*0.05), int(h*0.55)]], [[int(w*0.05), int(h*0.95)]], [[int(w*0.45), int(h*0.95)]], [[int(w*0.45), int(h*0.55)]]], dtype=np.int32)
-                c4 = np.array([[[int(w*0.55), int(h*0.55)]], [[int(w*0.55), int(h*0.95)]], [[int(w*0.95), int(h*0.95)]], [[int(w*0.95), int(h*0.55)]]], dtype=np.int32)
+                c1 = np.array([[[int(w*0.05),int(h*0.05)]],[[int(w*0.05),int(h*0.45)]],[[int(w*0.45),int(h*0.45)]],[[int(w*0.45),int(h*0.05)]]], dtype=np.int32)
+                c2 = np.array([[[int(w*0.55),int(h*0.05)]],[[int(w*0.55),int(h*0.45)]],[[int(w*0.95),int(h*0.45)]],[[int(w*0.95),int(h*0.05)]]], dtype=np.int32)
+                c3 = np.array([[[int(w*0.05),int(h*0.55)]],[[int(w*0.05),int(h*0.95)]],[[int(w*0.45),int(h*0.95)]],[[int(w*0.45),int(h*0.55)]]], dtype=np.int32)
+                c4 = np.array([[[int(w*0.55),int(h*0.55)]],[[int(w*0.55),int(h*0.95)]],[[int(w*0.95),int(h*0.95)]],[[int(w*0.95),int(h*0.55)]]], dtype=np.int32)
                 food_contours = [c1, c2, c3, c4]
 
             for idx, contour in enumerate(food_contours[:8]):
                 cx_coord, cy_coord, cw_coord, ch_coord = cv2.boundingRect(contour)
-                bbox = [cx_coord, cy_coord, cx_coord + cw_coord, cy_coord + ch_coord]
-
-                area_pixels = cv2.contourArea(contour)
-                if area_pixels == 0:
-                    area_pixels = cw_coord * ch_coord * 0.785
-                area_cm2 = area_pixels * cm2_per_pixel2
-
+                bbox = [cx_coord, cy_coord, cx_coord+cw_coord, cy_coord+ch_coord]
+                area_pixels = cv2.contourArea(contour) or cw_coord*ch_coord*0.785
+                area_cm2    = area_pixels * cm2_per_pixel2
                 single_mask = np.zeros((h, w), dtype=np.uint8)
                 cv2.drawContours(single_mask, [contour], -1, 255, -1)
-
-                dist = cv2.distanceTransform(single_mask, cv2.DIST_L2, 3)
-                cv2.normalize(dist, dist, 0, 200, cv2.NORM_MINMAX)
-                depth_img = np.maximum(depth_img, dist.astype(np.uint8))
-
-                mean_val = cv2.mean(dist, mask=single_mask)[0]
+                dist_t = cv2.distanceTransform(single_mask, cv2.DIST_L2, 3)
+                cv2.normalize(dist_t, dist_t, 0, 200, cv2.NORM_MINMAX)
+                depth_img = np.maximum(depth_img, dist_t.astype(np.uint8))
+                mean_val = cv2.mean(dist_t, mask=single_mask)[0]
                 est_height_cm = 1.5 + (mean_val / 200.0) * 2.5
-                volume = area_cm2 * est_height_cm
-
-                # Classify using improved HSV analysis
+                volume  = area_cm2 * est_height_cm
                 food_name = classify_by_hsv_analysis(image, contour)
                 food_info = FOOD_DENSITY_NUTRITION[food_name]
-                weight = volume * food_info["density"]
-                weight = max(15.0, min(weight, 500.0))
-
-                color = mask_colors[idx % len(mask_colors)]
-                cv2.rectangle(bbox_img, (cx_coord, cy_coord), (cx_coord + cw_coord, cy_coord + ch_coord), color, 3)
+                weight  = max(15.0, min(volume * food_info["density"], 500.0))
+                color   = mask_colors[idx % len(mask_colors)]
+                cv2.rectangle(bbox_img, (cx_coord,cy_coord), (cx_coord+cw_coord,cy_coord+ch_coord), color, 3)
                 label = f"{food_name} ({int(weight)}g)"
-                (tw, th_text), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-                cv2.rectangle(bbox_img, (cx_coord, cy_coord - th_text - 10), (cx_coord + tw + 6, cy_coord), color, -1)
-                cv2.putText(bbox_img, label, (cx_coord + 3, cy_coord - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2)
-
+                (tw2,th2),_ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+                cv2.rectangle(bbox_img,(cx_coord,cy_coord-th2-10),(cx_coord+tw2+6,cy_coord),color,-1)
+                cv2.putText(bbox_img,label,(cx_coord+3,cy_coord-5),cv2.FONT_HERSHEY_SIMPLEX,0.55,(0,0,0),2)
                 cv2.drawContours(mask_img, [contour], -1, color, -1)
-
                 detected_items.append({
-                    "name": food_name,
-                    "weight_g": round(weight, 1),
-                    "volume_cm3": round(volume, 1),
-                    "bounding_box": json.dumps(bbox),
-                    "density": food_info["density"],
-                    "calories": round((food_info["calories_100g"] * weight) / 100.0, 1),
-                    "protein": round((food_info["protein_100g"] * weight) / 100.0, 2),
-                    "carbs": round((food_info["carbs_100g"] * weight) / 100.0, 2),
-                    "fat": round((food_info["fat_100g"] * weight) / 100.0, 2),
-                    "fiber": round((food_info["fiber_100g"] * weight) / 100.0, 2),
-                    "sodium": round((food_info["sodium_100g"] * weight) / 100.0, 1),
-                    "sugar": round((food_info["sugar_100g"] * weight) / 100.0, 2)
+                    "name": food_name, "weight_g": round(weight,1),
+                    "volume_cm3": round(volume,1), "bounding_box": json.dumps(bbox),
+                    "density": food_info["density"], "confidence": 0.4,
+                    "detection_method": "opencv_fallback",
+                    "calories":round((food_info["calories_100g"]*weight)/100.0,1),
+                    "protein": round((food_info["protein_100g"]*weight)/100.0,2),
+                    "carbs":   round((food_info["carbs_100g"]*weight)/100.0,2),
+                    "fat":     round((food_info["fat_100g"]*weight)/100.0,2),
+                    "fiber":   round((food_info["fiber_100g"]*weight)/100.0,2),
+                    "sodium":  round((food_info["sodium_100g"]*weight)/100.0,1),
+                    "sugar":   round((food_info["sugar_100g"]*weight)/100.0,2)
                 })
 
             cv2.addWeighted(mask_img, 0.4, image, 0.6, 0, mask_img)
-            depth_img = cv2.GaussianBlur(depth_img, (11, 11), 0)
+            depth_img   = cv2.GaussianBlur(depth_img, (11, 11), 0)
             depth_color = cv2.applyColorMap(depth_img, cv2.COLORMAP_INFERNO)
 
     # Save all visualizations
