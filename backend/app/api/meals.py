@@ -75,7 +75,9 @@ async def upload_meal(
         mask_url=cv_result["mask_url"],
         depth_url=cv_result["depth_url"],
         health_score=health_score,
-        coach_notes=coach_notes
+        coach_notes=coach_notes,
+        quality_score=cv_result.get("quality_score", 100.0),
+        detection_method=cv_result.get("detection_method", "opencv_fallback")
     )
     db.add(new_meal)
     db.commit()
@@ -104,7 +106,9 @@ async def upload_meal(
             fat=item["fat"],
             fiber=item["fiber"],
             sodium=item["sodium"],
-            sugar=item["sugar"]
+            sugar=item["sugar"],
+            confidence=item.get("confidence", 1.0),
+            detection_method=item.get("detection_method", "opencv_fallback")
         )
         db.add(food_item)
         

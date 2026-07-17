@@ -83,6 +83,8 @@ class FoodItemResponse(BaseModel):
     density: float
     volume_cm3: float
     bounding_box: Optional[str] = None # JSON string
+    confidence: float
+    detection_method: str
 
     class Config:
         from_attributes = True
@@ -110,6 +112,8 @@ class MealResponse(BaseModel):
     total_sugar: float
     health_score: int
     coach_notes: Optional[str] = None
+    quality_score: float
+    detection_method: str
     created_at: datetime
     food_items: List[FoodItemResponse] = []
 
@@ -123,6 +127,8 @@ class MealSimpleResponse(BaseModel):
     total_carbs: float
     total_fat: float
     health_score: int
+    quality_score: float
+    detection_method: str
     created_at: datetime
 
     class Config:

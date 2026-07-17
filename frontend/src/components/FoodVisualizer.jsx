@@ -26,9 +26,9 @@ export default function FoodVisualizer({ meal, onSavePortions, apiHost = 'http:/
     },
     {
       id: 'detection',
-      label: '2. YOLOv11 BBoxes',
+      label: '2. Grounding DINO',
       image: meal.processed_url,
-      description: 'YOLOv11 processes the image to output localized bounding boxes and initial food classes.',
+      description: 'Grounding DINO performs zero-shot open-vocabulary object localization to output precise bounding boxes, which are then refined by CLIP classification.',
       badgeColor: 'var(--color-purple)'
     },
     {
@@ -74,7 +74,39 @@ export default function FoodVisualizer({ meal, onSavePortions, apiHost = 'http:/
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
           <div>
             <h2 style={{ fontSize: '20px', fontWeight: '700' }}>AI Model Pipeline Viewer</h2>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Step-by-step deep learning processing</p>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '4px', flexWrap: 'wrap' }}>
+              <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Pipeline:</span>
+              <span style={{
+                padding: '2px 8px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontWeight: '700',
+                textTransform: 'uppercase',
+                background: 
+                  meal.detection_method === 'gdino_clip' ? 'rgba(16, 185, 129, 0.1)' :
+                  meal.detection_method === 'gemini_vision' ? 'rgba(139, 92, 246, 0.1)' :
+                  meal.detection_method === 'demo' ? 'rgba(6, 182, 212, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                color:
+                  meal.detection_method === 'gdino_clip' ? 'var(--color-emerald)' :
+                  meal.detection_method === 'gemini_vision' ? 'var(--color-purple)' :
+                  meal.detection_method === 'demo' ? 'var(--color-cyan)' : 'var(--color-rose)',
+                border: '1px solid currentColor'
+              }}>
+                {
+                  meal.detection_method === 'gdino_clip' ? 'Grounding DINO + CLIP (Local)' :
+                  meal.detection_method === 'gemini_vision' ? 'Gemini 2.0 Flash' :
+                  meal.detection_method === 'demo' ? 'Demo Simulation' : 'OpenCV Fallback'
+                }
+              </span>
+              {meal.quality_score !== undefined && (
+                <>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>•</span>
+                  <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+                    Image Quality: <strong style={{ color: meal.quality_score >= 75 ? 'var(--color-emerald)' : 'var(--color-rose)' }}>{Math.round(meal.quality_score)}/100</strong>
+                  </span>
+                </>
+              )}
+            </div>
           </div>
           <div style={{ display: 'inline-flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-color)', flexWrap: 'wrap' }}>
             {steps.map(s => (
@@ -202,12 +234,13 @@ export default function FoodVisualizer({ meal, onSavePortions, apiHost = 'http:/
         </div>
 
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '500px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '600px' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-secondary)', fontSize: '13px' }}>
                 <th style={{ padding: '12px 8px' }}>Food Name</th>
                 <th style={{ padding: '12px 8px' }}>Estimated Volume</th>
                 <th style={{ padding: '12px 8px' }}>Portion Weight</th>
+                <th style={{ padding: '12px 8px' }}>Model Confidence</th>
                 <th style={{ padding: '12px 8px' }}>Calories</th>
                 <th style={{ padding: '12px 8px' }}>Protein</th>
                 <th style={{ padding: '12px 8px' }}>Carbs</th>
@@ -247,6 +280,16 @@ export default function FoodVisualizer({ meal, onSavePortions, apiHost = 'http:/
                     ) : (
                       <span style={{ fontWeight: '600', color: 'var(--color-cyan)' }}>{item.weight_g} g</span>
                     )}
+                  </td>
+                  <td style={{ padding: '16px 8px' }}>
+                    <span style={{
+                      fontWeight: '700',
+                      color:
+                        item.confidence >= 0.70 ? 'var(--color-emerald)' :
+                        item.confidence >= 0.50 ? 'var(--color-amber)' : 'var(--color-rose)'
+                    }}>
+                      {item.confidence !== undefined ? `${Math.round(item.confidence * 100)}%` : '100%'}
+                    </span>
                   </td>
                   <td style={{ padding: '16px 8px', color: '#fff' }}>{Math.round(item.calories)} kcal</td>
                   <td style={{ padding: '16px 8px', color: 'var(--color-emerald)', fontWeight: '500' }}>{item.protein}g</td>

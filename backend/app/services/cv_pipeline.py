@@ -21,12 +21,13 @@ except ImportError:
     PHASE2_AVAILABLE = False
     print("[Pipeline] Phase 2 services not available — torch not installed")
 
-# ── Phase 3: Depth estimation ─────────────────────────────────────────────────
+# ── Phase 3: Depth estimation & Segmentation ──────────────────────────────────
 try:
     from app.services.depth_estimator import (
         estimate_depth_map, estimate_volume_from_depth,
         generate_depth_colormap, fallback_depth_estimate
     )
+    from app.services.segmentor import segment_food_items, overlay_mask_on_image
     PHASE3_AVAILABLE = True
 except ImportError:
     PHASE3_AVAILABLE = False
@@ -516,12 +517,15 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
 
     h, w, c = image.shape
     detected_items = []
+    quality_score_val = 100.0
+    meal_detection_method = "opencv_fallback"
 
     # ── Phase 1: Image Quality Gate ─────────────────────────────────────────
     # Skip quality check for demo meals (pre-built 1x1 pixel blobs)
     is_demo = any(key in file_name.lower() for key in DEMO_MEALS.keys())
     if not is_demo:
         quality_report = assess_image_quality(file_path)
+        quality_score_val = quality_report.quality_score
         if not quality_report.is_acceptable:
             issue_summary = " | ".join(quality_report.issues) if quality_report.issues else "Low quality score"
             raise ValueError(
@@ -548,6 +552,7 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
 
     if matched_demo:
         # =============== DEMO MODE ===============
+        meal_detection_method = "demo"
         demo_items = DEMO_MEALS[matched_demo]
         for idx, item in enumerate(demo_items):
             xmin, ymin, xmax, ymax = item["bbox"]
@@ -649,6 +654,7 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
         # ── TIER 4 decision: which result set to use for rendering ─────────
         if clip_classified and not needs_gemini_overall:
             # Best case: GDINO + CLIP succeeded
+            meal_detection_method = "gdino_clip"
             source_items = []
             for c in clip_classified:
                 matched_name, _ = match_food_semantic(c["clip_name"])
@@ -662,6 +668,7 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
                 })
         elif gemini_items:
             # Gemini/OpenRouter results
+            meal_detection_method = "gemini_vision"
             source_items = []
             for gi in gemini_items:
                 food_name = gi.get("name", "Unknown")
@@ -680,11 +687,16 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
                     "method":     "gemini_vision"
                 })
         else:
+            meal_detection_method = "opencv_fallback"
             source_items = []   # Will trigger OpenCV fallback below
 
-        # ── DEPTH MAP (Phase 3) ────────────────────────────────────────────
+        # ── SAM 2 SEGMENTATION (Phase 3) ───────────────────────────────────
+        sam2_mask = None
+        individual_masks = []
         depth_map = None
         if PHASE3_AVAILABLE and source_items:
+            bboxes_px = [si["bbox_px"] for si in source_items]
+            sam2_mask, individual_masks = segment_food_items(file_path, bboxes_px)
             depth_map = estimate_depth_map(file_path)
 
         # ── Build detected_items + draw visualizations ─────────────────────
@@ -740,17 +752,28 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
                 cv2.putText(bbox_img, label, (xmin+3, ymin-5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
 
-                # Elliptical mask
-                cx_c, cy_c = (xmin+xmax)//2, (ymin+ymax)//2
-                rx_c, ry_c = max(1,(xmax-xmin)//2), max(1,(ymax-ymin)//2)
-                cv2.ellipse(mask_img, (cx_c,cy_c), (rx_c,ry_c), 0, 0, 360, color, -1)
+                # Precise SAM2 mask or elliptical fallback
+                if sam2_mask is not None and idx < len(individual_masks):
+                    item_mask = individual_masks[idx]
+                    mask_img = overlay_mask_on_image(mask_img, item_mask, color, alpha=0.4)
 
-                # Depth visualization fallback
-                item_depth_u8 = np.zeros((h, w), dtype=np.uint8)
-                cv2.ellipse(item_depth_u8, (cx_c,cy_c), (rx_c,ry_c), 0, 0, 360, 255, -1)
-                dist_t = cv2.distanceTransform(item_depth_u8, cv2.DIST_L2, 3)
-                cv2.normalize(dist_t, dist_t, 0, 200, cv2.NORM_MINMAX)
-                depth_img = np.maximum(depth_img, dist_t.astype(np.uint8))
+                    # Also use the real mask for depth visualizer
+                    item_depth_u8 = (item_mask * 255).astype(np.uint8)
+                    dist_t = cv2.distanceTransform(item_depth_u8, cv2.DIST_L2, 3)
+                    cv2.normalize(dist_t, dist_t, 0, 200, cv2.NORM_MINMAX)
+                    depth_img = np.maximum(depth_img, dist_t.astype(np.uint8))
+                else:
+                    # Elliptical mask
+                    cx_c, cy_c = (xmin+xmax)//2, (ymin+ymax)//2
+                    rx_c, ry_c = max(1,(xmax-xmin)//2), max(1,(ymax-ymin)//2)
+                    cv2.ellipse(mask_img, (cx_c,cy_c), (rx_c,ry_c), 0, 0, 360, color, -1)
+
+                    # Depth visualization fallback
+                    item_depth_u8 = np.zeros((h, w), dtype=np.uint8)
+                    cv2.ellipse(item_depth_u8, (cx_c,cy_c), (rx_c,ry_c), 0, 0, 360, 255, -1)
+                    dist_t = cv2.distanceTransform(item_depth_u8, cv2.DIST_L2, 3)
+                    cv2.normalize(dist_t, dist_t, 0, 200, cv2.NORM_MINMAX)
+                    depth_img = np.maximum(depth_img, dist_t.astype(np.uint8))
 
                 detected_items.append({
                     "name":           food_name,
@@ -856,5 +879,7 @@ def analyze_uploaded_image(file_name: str, db_session) -> dict:
         "mask_url": f"/static/uploads/{mask_file_name}",
         "depth_url": f"/static/uploads/{depth_file_name}",
         "food_items": detected_items,
-        "validation": validation_summary
+        "validation": validation_summary,
+        "quality_score": quality_score_val,
+        "detection_method": meal_detection_method
     }

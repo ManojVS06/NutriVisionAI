@@ -20,13 +20,13 @@ export default function Scanner({
       setLoadingStep(0);
       interval = setInterval(() => {
         setLoadingStep(prev => {
-          if (prev >= 3) {
+          if (prev >= 5) {
             clearInterval(interval);
-            return 3;
+            return 5;
           }
           return prev + 1;
         });
-      }, 1200);
+      }, 1500); // 1.5s per step
     } else {
       setLoadingStep(0);
     }
@@ -60,10 +60,12 @@ export default function Scanner({
   };
 
   const loadingMessages = [
-    "Running YOLOv11 Food Object Detection...",
-    "Segmenting exact contours with SAM2...",
-    "Estimating 3D height using Depth Anything V2...",
-    "Querying IFCT database & generating Coach advice..."
+    "Assessing image quality gates (blur, exposure, plate presence)...",
+    "Running Grounding DINO open-vocabulary detector...",
+    "Refining class scores against 155 IFCT foods with CLIP...",
+    "Segmenting exact contours with SAM2 Hiera...",
+    "Estimating 3D portion volume with Depth Anything V2...",
+    "Running biochemical sanity validator & generating coach advice..."
   ];
 
   return (
