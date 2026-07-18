@@ -292,12 +292,15 @@ def segment_food_regions_opencv(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (9, 9), 2)
 
-    # Try Hough circle detection for the plate
-    circles = cv2.HoughCircles(
-        blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(h, w) // 2,
-        param1=80, param2=40,
-        minRadius=min(h, w) // 4, maxRadius=min(h, w) // 2
-    )
+    # Try Hough circle detection for the plate (skip for tiny images like 1×1 demo blobs)
+    if min(h, w) >= 30:
+        circles = cv2.HoughCircles(
+            blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=max(1, min(h, w) // 2),
+            param1=80, param2=40,
+            minRadius=min(h, w) // 4, maxRadius=min(h, w) // 2
+        )
+    else:
+        circles = None
 
     plate_mask = np.ones((h, w), dtype=np.uint8) * 255
     plate_center = (w // 2, h // 2)

@@ -41,3 +41,17 @@ def read_root():
         "docs_url": "/docs",
         "status": "online"
     }
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for monitoring and smoke tests."""
+    from app.services.model_registry import get_registry
+    registry = get_registry()
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "pipeline": "4-tier (DINO→CLIP→Gemini→OpenCV)",
+        "models_loaded": list(registry.loaded_models.keys()) if hasattr(registry, "loaded_models") else [],
+        "ifct_foods": 155
+    }
+
