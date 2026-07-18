@@ -48,6 +48,21 @@ _lock = threading.Lock()
 _load_times: dict[str, float] = {}
 
 
+class _RegistryView:
+    """Thin wrapper so /health can iterate loaded models."""
+    @property
+    def loaded_models(self) -> dict:
+        return {k: v for k, v in _registry.items() if v is not None}
+
+
+_registry_view = _RegistryView()
+
+
+def get_registry() -> _RegistryView:
+    """Return a view of the model registry for status endpoints."""
+    return _registry_view
+
+
 def _register(name: str, loader_fn) -> Optional[Any]:
     """
     Thread-safe singleton loader. Calls loader_fn() once, caches result.
@@ -78,8 +93,14 @@ GDINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 def _load_grounding_dino():
     from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
     import torch
-    processor = AutoProcessor.from_pretrained(GDINO_MODEL_ID)
-    model = AutoModelForZeroShotObjectDetection.from_pretrained(GDINO_MODEL_ID)
+    # Try offline (cached) first; fall back to online download if cache miss
+    try:
+        processor = AutoProcessor.from_pretrained(GDINO_MODEL_ID, local_files_only=True)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(GDINO_MODEL_ID, local_files_only=True)
+    except Exception:
+        print(f"[ModelRegistry] Grounding DINO not cached — downloading from HuggingFace...")
+        processor = AutoProcessor.from_pretrained(GDINO_MODEL_ID)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(GDINO_MODEL_ID)
     model = model.to(DEVICE)
     model.eval()
     return {"model": model, "processor": processor}
@@ -117,8 +138,13 @@ SAM2_MODEL_ID = "facebook/sam2-hiera-tiny"
 def _load_sam2():
     from transformers import Sam2Processor, Sam2Model
     import torch
-    processor = Sam2Processor.from_pretrained(SAM2_MODEL_ID)
-    model = Sam2Model.from_pretrained(SAM2_MODEL_ID)
+    try:
+        processor = Sam2Processor.from_pretrained(SAM2_MODEL_ID, local_files_only=True)
+        model = Sam2Model.from_pretrained(SAM2_MODEL_ID, local_files_only=True)
+    except Exception:
+        print(f"[ModelRegistry] SAM2 not cached — downloading from HuggingFace...")
+        processor = Sam2Processor.from_pretrained(SAM2_MODEL_ID)
+        model = Sam2Model.from_pretrained(SAM2_MODEL_ID)
     model = model.to(DEVICE)
     model.eval()
     return {"model": model, "processor": processor}
@@ -135,8 +161,13 @@ DEPTH_MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
 def _load_depth_anything():
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
     import torch
-    processor = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
-    model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
+    try:
+        processor = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID, local_files_only=True)
+        model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID, local_files_only=True)
+    except Exception:
+        print(f"[ModelRegistry] Depth Anything not cached — downloading from HuggingFace...")
+        processor = AutoImageProcessor.from_pretrained(DEPTH_MODEL_ID)
+        model = AutoModelForDepthEstimation.from_pretrained(DEPTH_MODEL_ID)
     model = model.to(DEVICE)
     model.eval()
     return {"model": model, "processor": processor}
