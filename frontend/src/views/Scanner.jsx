@@ -8,7 +8,9 @@ export default function Scanner({
   onSelectDemo, 
   onSavePortions, 
   isLoading, 
-  apiHost 
+  apiHost,
+  error,
+  setError
 }) {
   const [dragActive, setDragActive] = useState(false);
   const [loadingStep, setLoadingStep] = useState(0);
@@ -79,6 +81,33 @@ export default function Scanner({
           </h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '16px', lineHeight: '150%' }}>
             Upload a photo of your plate or select one of our pre-defined Indian meal templates to run the computer vision portion and nutrient analysis engine.
+          </p>
+        </div>
+      )}
+
+      {/* Quality Gate Rejection Error Banner */}
+      {error && !isLoading && !activeMeal && (
+        <div className="card" style={{
+          borderLeft: '4px solid var(--color-rose)',
+          background: 'linear-gradient(to right, rgba(239,68,68,0.03), rgba(17,24,39,0.7))',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '10px',
+          padding: '20px',
+          position: 'relative'
+        }}>
+          <button 
+            style={{ position: 'absolute', top: '12px', right: '12px', background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}
+            onClick={() => setError(null)}
+          >
+            ✕
+          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '20px' }}>⚠️</span>
+            <h4 style={{ fontSize: '15px', fontWeight: '700', color: 'var(--color-rose)' }}>Image Quality Rejection Gate</h4>
+          </div>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '13.5px', lineHeight: '145%' }}>
+            {error}
           </p>
         </div>
       )}

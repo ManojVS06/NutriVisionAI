@@ -22,6 +22,7 @@ export default function App() {
   const [activeMeal, setActiveMeal] = useState(null);
   const [isLoadingScanner, setIsLoadingScanner] = useState(false);
   const [isCoachLoading, setIsCoachLoading] = useState(false);
+  const [scannerError, setScannerError] = useState(null);
   
   // Chat History
   const [chatHistory, setChatHistory] = useState([
@@ -150,6 +151,7 @@ export default function App() {
   // 3. UPLOAD CUSTOM PLATE FILE
   const handleUploadFile = async (file) => {
     setIsLoadingScanner(true);
+    setScannerError(null);
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -161,7 +163,7 @@ export default function App() {
 
       if (!res.ok) {
         const err = await res.json();
-        alert(err.detail || "Scan failed.");
+        setScannerError(err.detail || "Scan failed.");
         return;
       }
 
@@ -171,7 +173,7 @@ export default function App() {
       // Refresh Dashboard stats
       fetchDashboardData();
     } catch (err) {
-      alert("Error scanning image. Make sure backend is running.");
+      setScannerError("Error scanning image. Make sure backend is running.");
       console.error(err);
     } finally {
       setIsLoadingScanner(false);
@@ -181,6 +183,7 @@ export default function App() {
   // 4. CHOOSE TEMPLATE SCAN SIMULATION
   const handleSelectDemo = async (demoName) => {
     setIsLoadingScanner(true);
+    setScannerError(null);
     try {
       // Create a 1x1 transparent pixel blob to satisfy UploadFile type constraints
       const canvas = document.createElement('canvas');
@@ -199,7 +202,7 @@ export default function App() {
 
       if (!res.ok) {
         const err = await res.json();
-        alert(err.detail || "Demo upload failed.");
+        setScannerError(err.detail || "Demo upload failed.");
         return;
       }
 
@@ -209,7 +212,7 @@ export default function App() {
       // Refresh statistics
       fetchDashboardData();
     } catch (err) {
-      alert("Error generating demo meal.");
+      setScannerError("Error generating demo meal.");
       console.error(err);
     } finally {
       setIsLoadingScanner(false);
@@ -394,6 +397,8 @@ export default function App() {
             onSavePortions={handleSavePortions}
             isLoading={isLoadingScanner}
             apiHost={apiHost}
+            error={scannerError}
+            setError={setScannerError}
           />
         )}
 
