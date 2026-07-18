@@ -66,9 +66,23 @@ def get_registry() -> _RegistryView:
 def _register(name: str, loader_fn) -> Optional[Any]:
     """
     Thread-safe singleton loader. Calls loader_fn() once, caches result.
-    Returns None if loading fails.
+
+    Uses a non-blocking acquire: if the model is already being loaded by
+    the warmup thread, returns None immediately so the request pipeline
+    can fall through to its OpenCV/API fallback without blocking.
     """
-    with _lock:
+    # Fast path: already loaded (or cached as failed)
+    if name in _registry:
+        return _registry[name]
+
+    # Try to acquire without blocking — if loading is in progress, skip
+    acquired = _lock.acquire(blocking=False)
+    if not acquired:
+        print(f"[ModelRegistry] {name} is being loaded by another thread — skipping for now")
+        return None
+
+    try:
+        # Double-check after lock acquired
         if name in _registry:
             return _registry[name]
 
@@ -85,6 +99,9 @@ def _register(name: str, loader_fn) -> Optional[Any]:
             print(f"[ModelRegistry] FAILED to load {name}: {e}")
             _registry[name] = None      # Cache the failure too
             return None
+    finally:
+        _lock.release()
+
 
 
 # ─── Grounding DINO ───────────────────────────────────────────────────────────
